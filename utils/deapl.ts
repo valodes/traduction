@@ -106,17 +106,13 @@ async function translatePhrase(text: string, options: Options, page: Page) {
 
     page.on('request', (request) => {
         if (['image', 'stylesheet', 'font'].indexOf(request.resourceType()) !== -1) {
-            request.respond({status: 200, body: 'aborted'})
+            request.respond({ status: 200, body: 'aborted' })
         } else {
             request.continue();
         }
     });
 
-    page.setUserAgent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_8_4) AppleWebKit/536.30.1 (KHTML, like Gecko) Version/6.0.5 Safari/536.30.1");
-
-    await page.goto('https://www.deepl.com/translator');
-
-    page.waitForNavigation({ waitUntil: 'networkidle0' });
+    await page.goto('https://www.deepl.com/translator', { waitUntil: 'networkidle2' });
 
     /*if (await hasSelector(page, selectors.chromeExtensionBanner)) {
         await page.click(selectors.chromeExtensionBanner);
@@ -191,19 +187,35 @@ async function translatePhrase(text: string, options: Options, page: Page) {
     return result;
 }
 
-export default async function translate(texts: string[], options: Options) {
+export default async function translate(texts, options) {
     const browser = await getBrowser();
-    const pages = await Promise.all(texts.map(async () => await browser.newPage()));
+    let pages: any = [];
+    let results: any = [];
 
-    const translationPromises = texts.map((text, index) => {
-        return translatePhrase(text, options, pages[index]);
-    });
+    try {
+        // Limiter le nombre d'onglets ouverts simultanément
+        const maxTabs = 5;
+        for (let i = 0; i < texts.length; i += maxTabs) {
+            const textsChunk = texts.slice(i, i + maxTabs);
+            pages = await Promise.all(textsChunk.map(() => browser.newPage()));
 
-    const results = await Promise.all(translationPromises);
+            const translationPromises = textsChunk.map((text, index) =>
+                translatePhrase(text, options, pages[index])
+            );
 
-    await Promise.all(pages.map(async (page) => await page.close()));
+            results = results.concat(await Promise.all(translationPromises));
 
-    await kill();
+            // Fermer les onglets après chaque lot de traductions
+            await Promise.all(pages.map(page => page.close()));
+            pages = [];
+        }
+    } catch (error) {
+        console.error('An error occurred during translation:', error);
+    } finally {
+        // Assurez-vous que toutes les pages sont fermées
+        await Promise.all(pages.map(page => page?.close()));
+        await kill();
+    }
 
     return results;
 }
