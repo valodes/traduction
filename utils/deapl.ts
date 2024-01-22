@@ -2,6 +2,8 @@
 import { Browser, Page, executablePath } from 'puppeteer'
 import puppeteer from 'puppeteer-extra'
 import StealthPlugin from 'puppeteer-extra-plugin-stealth'
+import * as cliProgress from 'cli-progress';
+import chalk from 'chalk';
 
 puppeteer.use(StealthPlugin())
 
@@ -56,7 +58,7 @@ const getBrowser = () => {
     if (!browserPromise) {
         browserPromise = puppeteer.launch({
             executablePath: executablePath(),
-            headless: false,
+            headless: "new",
         })
     }
     return browserPromise
@@ -71,6 +73,7 @@ export async function kill() {
 const sleepMs = (ms: number) => new Promise((resolve) => {
     setTimeout(resolve, ms)
 })
+
 const hasSelector = (page: Page, selector: string) => page.evaluate(s =>
     !!document.querySelector(s), selector)
 
@@ -92,45 +95,43 @@ const selectors = {
     chromeExtensionBanner: '[data-testid=chrome-extension-toast] button[aria-label=Fermer]',
 }
 
-async function translatePhrase(text: string, options: Options, page: Page) {
+/**
+ * Traduit une phrase en utilisant le site web DeepL.
+ *
+ * @param {string} text - Le texte à traduire.
+ * @param {Options} options - Les options de traduction.
+ * @param {Page} page - La page Puppeteer à utiliser pour la traduction.
+ * @returns {Promise<string>} La traduction du texte.
+ */
+async function translatePhrase(text: string, options: Options): Promise<string> {
+
+    const browser = await getBrowser();
+    const page = await browser.newPage();
+
     const defaultDelay = options.defaultDelay || 150;
     const targetLanguage = TargetLanguageMap[options.targetLanguage] as TargetLanguage;
 
+    // Attends que la traduction soit terminée
     const waitForTranslation = async () => {
         await sleepMs(1000);
         await page.waitForSelector(selectors.translationActive, { hidden: true });
         await sleepMs(1000);
     };
 
+    // Configure l'interception des requêtes pour bloquer les ressources inutiles
     await page.setRequestInterception(true);
-
     page.on('request', (request) => {
-        if (['image', 'stylesheet', 'font'].indexOf(request.resourceType()) !== -1) {
-            request.respond({ status: 200, body: 'aborted' })
+        if (['image', 'stylesheet', 'font', 'media', 'imageset'].includes(request.resourceType())) {
+            request.respond({ status: 200, body: 'aborted' });
         } else {
             request.continue();
         }
     });
 
-    await page.goto('https://www.deepl.com/translator', { waitUntil: 'networkidle2' });
+    // Accède à la page de traduction
+    await page.goto('https://www.deepl.com/translator', { waitUntil: 'networkidle0' });
 
-    /*if (await hasSelector(page, selectors.chromeExtensionBanner)) {
-        await page.click(selectors.chromeExtensionBanner);
-    }*/
-
-    await page.waitForSelector(selectors.selectTargetLanguageButton);
-
-    /*while (await hasSelector(page, selectors.cookieBannerDismiss)) {
-        await page.click(selectors.cookieBannerDismiss);
-        await sleepMs(1000);
-    }*/
-
-    /*await sleepMs(2000);
-    while (await hasSelector(page, selectors.dialogDismiss)) {
-        await page.click(selectors.dialogDismiss);
-        await sleepMs(1000);
-    }*/
-
+    // Configure la langue source, si spécifiée
     if (options.sourceLanguage) {
         await sleepMs(defaultDelay);
         await page.waitForSelector(selectors.selectSourceLanguageButton);
@@ -139,83 +140,70 @@ async function translatePhrase(text: string, options: Options, page: Page) {
         await page.click(selectors.sourceLanguageOption(options.sourceLanguage));
     }
 
+    // Configure la langue cible
     await sleepMs(defaultDelay);
     await page.click(selectors.selectTargetLanguageButton);
     await sleepMs(defaultDelay);
     await page.click(selectors.targetLanguageOption(targetLanguage));
     await sleepMs(defaultDelay);
 
+    // Entrez le texte à traduire
     await page.click(selectors.sourceTextarea);
     await sleepMs(defaultDelay);
-    //await page.keyboard.type(text);
     await page.evaluate((text, selector) => {
         const textarea = document.querySelector(selector) as HTMLTextAreaElement;
         if (textarea) {
             textarea.value = text;
-            // Déclencher les événements input et change pour que l'application réagisse à la modification du texte
             textarea.dispatchEvent(new Event('input', { 'bubbles': true }));
             textarea.dispatchEvent(new Event('change', { 'bubbles': true }));
         }
     }, text, selectors.sourceTextarea);
+
+    // Attends que la traduction soit terminée
     await waitForTranslation();
 
-    if (options.formality) {
-        if (!await hasSelector(page, selectors.formalityToggler)) {
-            throw new Error('Cannot switch formality');
-        }
-
-        await sleepMs(defaultDelay);
-        if (options.formality === 'formal') {
-            await page.click(selectors.formalityToggler);
-            await page.waitForSelector(selectors.formalOption);
-            await page.click(selectors.formalOption);
-        } else if (options.formality === 'informal') {
-            await page.click(selectors.formalityToggler);
-            await page.waitForSelector(selectors.informalOption);
-            await page.click(selectors.informalOption);
-        }
-
-        await waitForTranslation();
-    }
-
+    // Récupère et renvoie la traduction
     const result = await page.evaluate((selector) => {
         const node = document.querySelector(selector) as HTMLTextAreaElement;
-        if (!node) return '';
-        return node.value;
+        return node ? node.innerText : '';
     }, selectors.targetTextarea);
+
+    // Ferme la page
+    await page.close();
 
     return result;
 }
 
 export default async function translate(texts, options) {
     const browser = await getBrowser();
-    let pages: any = [];
-    let results: any = [];
+
+    // Créer une nouvelle barre de progression
+    const progressBar = new cliProgress.SingleBar({
+        format: 'Translation progress: ' + chalk.red('{bar}') + ' {percentage}% | ETA: {eta}s | {value}/{total}',
+        barCompleteChar: '\u2588',
+        barIncompleteChar: '\u2591',
+        hideCursor: true
+    });
+
+    progressBar.start(texts.length, 0);
 
     try {
-        // Limiter le nombre d'onglets ouverts simultanément
-        const maxTabs = 5;
-        for (let i = 0; i < texts.length; i += maxTabs) {
-            const textsChunk = texts.slice(i, i + maxTabs);
-            pages = await Promise.all(textsChunk.map(() => browser.newPage()));
+        // Traduire tous les textes en parallèle
+        const results = await Promise.all(texts.map(async (text, index) => {
+            const result = await translatePhrase(text, options);
 
-            const translationPromises = textsChunk.map((text, index) =>
-                translatePhrase(text, options, pages[index])
-            );
+            // Mettre à jour la barre de progression
+            progressBar.update(texts.length - index);
 
-            results = results.concat(await Promise.all(translationPromises));
+            return result;
+        }));
 
-            // Fermer les onglets après chaque lot de traductions
-            await Promise.all(pages.map(page => page.close()));
-            pages = [];
-        }
+        progressBar.stop();
+
+        return results;
     } catch (error) {
         console.error('An error occurred during translation:', error);
     } finally {
-        // Assurez-vous que toutes les pages sont fermées
-        await Promise.all(pages.map(page => page?.close()));
         await kill();
     }
-
-    return results;
 }

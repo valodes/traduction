@@ -4,13 +4,12 @@ import { newWord } from '../utils/word';
 describe('newWord function', () => {
     const outputPath = __dirname + '/test-output.docx';
 
-    /*
     afterAll(() => {
         // Nettoyer: supprimer le fichier de test après l'exécution du test
         if (fs.existsSync(outputPath)) {
             fs.unlinkSync(outputPath);
         }
-    });*/
+    });
 
     it('should create a Word document', async () => {
         const text1 = ["Texte en français", "Deuxième ligne"];
